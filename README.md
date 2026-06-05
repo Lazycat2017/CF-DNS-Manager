@@ -54,7 +54,7 @@
 1. 添加 `KOMARI_BASE_URL` 变量（Komari 面板地址，如 `https://komari.example.com`）
 2. 添加 `KOMARI_API_TOKEN` 变量（Komari API 令牌）
 
-配置后，在 DNS 记录添加/编辑 A 或 AAAA 记录时，可通过下拉框快速选择 Komari 服务器 IP；DNS 列表中已解析的 IP 也会显示对应的 Komari 服务器名称标签。
+配置后，在 DNS 记录添加/编辑 A 或 AAAA 记录时，可通过可搜索下拉框快速选择 Komari 服务器 IP；DNS 列表中已解析的 IP 也会显示对应的 Komari 服务器名称标签，并支持通过服务器名称搜索匹配记录。
 
 
 ## 🏗️ 项目架构

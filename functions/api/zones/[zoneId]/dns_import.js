@@ -3,12 +3,17 @@ export async function onRequestPost(context) {
     const { zoneId } = context.params;
 
     // Proxy the multipart form data request
+    const contentType = context.request.headers.get('Content-Type');
+    const headers = {
+        'Authorization': `Bearer ${cfToken}`
+    };
+    if (contentType) {
+        headers['Content-Type'] = contentType;
+    }
+
     const response = await fetch(`https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records/import`, {
         method: 'POST',
-        headers: {
-            'Authorization': `Bearer ${cfToken}`
-            // Don't set Content-Type, let the browser/fetch handle it for multipart
-        },
+        headers,
         body: context.request.body
     });
 

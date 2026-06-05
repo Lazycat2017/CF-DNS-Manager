@@ -34,6 +34,10 @@ export async function onRequest(context) {
             const secret = new TextEncoder().encode(serverSecret);
             await jwtVerify(token, secret);
 
+            if (url.pathname === '/api/accounts' || url.pathname === '/api/refresh') {
+                return next();
+            }
+
             // JWT is valid
             const accountIndex = parseInt(request.headers.get('X-Managed-Account-Index') || '0');
             let serverToken = env.CF_API_TOKEN;
@@ -48,7 +52,7 @@ export async function onRequest(context) {
                 });
             }
 
-            context.data.cfToken = serverToken;
+            context.data.cfToken = serverToken.trim().replace(/^["']|["']$/g, '');
             // Inject DNSPod credentials for managed mode
             context.data.dnspodSecretId = env.DNSPOD_SECRET_ID;
             context.data.dnspodSecretKey = env.DNSPOD_SECRET_KEY;

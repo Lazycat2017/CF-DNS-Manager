@@ -30,12 +30,14 @@ export async function onRequestPost(context) {
         const accounts = [];
         if (env.CF_API_TOKEN) accounts.push({ id: 0, name: 'Default Account' });
 
-        // Scan for additional tokens (CF_API_TOKEN1, CF_API_TOKEN2, etc.)
-        let i = 1;
-        while (env[`CF_API_TOKEN${i}`]) {
-            accounts.push({ id: i, name: `Account ${i}` });
-            i++;
-        }
+        Object.keys(env).forEach(key => {
+            const match = key.match(/^CF_API_TOKEN(\d+)$/);
+            if (match) {
+                accounts.push({ id: parseInt(match[1], 10), name: `Account ${match[1]}` });
+            }
+        });
+
+        accounts.sort((a, b) => a.id - b.id);
 
         return new Response(JSON.stringify({ token: jwt, accounts }), {
             headers: { 'Content-Type': 'application/json' }

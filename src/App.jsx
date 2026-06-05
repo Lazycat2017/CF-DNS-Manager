@@ -1,6 +1,37 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Globe, Server, User, Shield, Key, LogOut, Plus, Trash2, Edit2, ExternalLink, RefreshCw, Zap, Languages, CheckCircle, AlertCircle, X, Search, ChevronDown, Upload, Download, Copy, ArrowLeft } from 'lucide-react';
 
+const DNS_RECORD_TYPES = ['A', 'AAAA', 'CNAME', 'TXT', 'MX', 'NS', 'SRV', 'URI', 'CAA', 'DS', 'TLSA', 'CERT', 'DNSKEY', 'HTTPS', 'LOC', 'NAPTR', 'PTR', 'SMIMEA', 'SSHFP', 'SVCB'];
+const PROXYABLE_DNS_TYPES = ['A', 'AAAA', 'CNAME'];
+const STRUCTURED_DNS_TYPES = ['SRV', 'CAA', 'URI', 'DS', 'TLSA', 'NAPTR', 'SSHFP', 'HTTPS', 'SVCB'];
+
+const decodeJWT = (token) => {
+    try {
+        const base64Url = token.split('.')[1];
+        const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+        const jsonPayload = decodeURIComponent(atob(base64).split('').map(c => {
+            return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+        }).join(''));
+        return JSON.parse(jsonPayload);
+    } catch {
+        return null;
+    }
+};
+
+const isTokenExpired = (token) => {
+    const payload = decodeJWT(token);
+    if (!payload || !payload.exp) return true;
+    return (Date.now() / 1000) > (payload.exp - 5);
+};
+
+const normalizeDnsRecordName = (name, zoneName) => {
+    const zone = String(zoneName || '').trim().replace(/\.$/, '').toLowerCase();
+    const value = String(name || '').trim().replace(/\.$/, '').toLowerCase();
+    if (!value || value === '@') return zone;
+    if (!zone || value === zone || value.endsWith(`.${zone}`)) return value;
+    return `${value}.${zone}`;
+};
+
 // Translations
 const translations = {
     zh: {
@@ -159,6 +190,9 @@ const translations = {
         invalidToken: '无效的 API 令牌',
         tokenRequired: '请输入 API 令牌',
         verifyFailed: '令牌校验失败',
+        dnsConflictCname: 'CNAME 记录不能与同名其他记录共存',
+        dnsConflictNs: 'NS 记录不能与同名其他记录共存',
+        cnameTargetSameName: 'CNAME 目标不能与记录名称相同',
         // DNSPod 管理
         dnspodManager: 'DNSPod 管理',
         dnspodDomains: 'DNSPod 域名',
@@ -333,6 +367,9 @@ const translations = {
         invalidToken: 'Invalid API Token',
         tokenRequired: 'API Token is required',
         verifyFailed: 'Token verification failed',
+        dnsConflictCname: 'CNAME records cannot coexist with other records at the same name',
+        dnsConflictNs: 'NS records cannot exist at the same name as any other record type',
+        cnameTargetSameName: 'CNAME target cannot match the record name',
         // DNSPod Management
         dnspodManager: 'DNSPod Manager',
         dnspodDomains: 'DNSPod Domains',
@@ -464,8 +501,9 @@ const getAuthHeaders = (auth, withType = false) => {
 };
 
 // Custom Select Component
-const CustomSelect = ({ value, options, onChange, placeholder = "Select..." }) => {
+const CustomSelect = ({ value, options, onChange, placeholder = "Select...", searchable = false }) => {
     const [isOpen, setIsOpen] = useState(false);
+    const [optionSearch, setOptionSearch] = useState('');
     const wrapperRef = useRef(null);
 
     useEffect(() => {
@@ -482,11 +520,15 @@ const CustomSelect = ({ value, options, onChange, placeholder = "Select..." }) =
 
     const handleSelect = (val) => {
         onChange({ target: { value: val } });
+        setOptionSearch('');
         setIsOpen(false);
     };
 
     const selectedOption = options.find(o => String(o.value) === String(value));
     const currentLabel = selectedOption ? selectedOption.label : value;
+    const visibleOptions = searchable && optionSearch
+        ? options.filter(opt => `${opt.label} ${opt.value}`.toLowerCase().includes(optionSearch.toLowerCase()))
+        : options;
 
     return (
         <div ref={wrapperRef} style={{ position: 'relative', width: '100%' }}>
@@ -528,7 +570,22 @@ const CustomSelect = ({ value, options, onChange, placeholder = "Select..." }) =
                     zIndex: 50,
                     boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.1)'
                 }}>
-                    {options.map(opt => (
+                    {searchable && (
+                        <div style={{ padding: '0.5rem', borderBottom: '1px solid #f7fafc' }}>
+                            <input
+                                type="text"
+                                value={optionSearch}
+                                onChange={(e) => setOptionSearch(e.target.value)}
+                                onKeyDown={(e) => {
+                                    if (e.key === 'Enter') e.preventDefault();
+                                }}
+                                placeholder={placeholder}
+                                style={{ height: '32px', fontSize: '0.8125rem', width: '100%' }}
+                                autoFocus
+                            />
+                        </div>
+                    )}
+                    {visibleOptions.map(opt => (
                         <div
                             key={opt.value}
                             onClick={() => handleSelect(opt.value)}
@@ -595,12 +652,13 @@ const Login = ({ onLogin, t, lang, onLangChange }) => {
                 });
                 const data = await res.json();
                 if (res.ok) {
-                    onLogin({
+                    const firstAccountId = data.accounts?.[0]?.id ?? 0;
+                    await onLogin({
                         mode: 'server',
                         token: data.token,
                         remember,
                         accounts: data.accounts || [],
-                        currentAccountIndex: 0
+                        currentAccountIndex: firstAccountId
                     });
                 } else {
                     let errMsg = data.error || t('loginFailed');
@@ -614,7 +672,7 @@ const Login = ({ onLogin, t, lang, onLangChange }) => {
                 });
                 const data = await res.json();
                 if (res.ok && data.success) {
-                    onLogin({ mode: 'client', token: token, remember });
+                    await onLogin({ mode: 'client', token: token, remember });
                 } else {
                     let errMsg = data.message || t('loginFailed');
                     if (errMsg === 'Invalid token') errMsg = t('invalidToken');
@@ -737,7 +795,7 @@ const Login = ({ onLogin, t, lang, onLangChange }) => {
 };
 
 
-const ZoneDetail = ({ zone, zones, onSwitchZone, onRefreshZones, zonesLoading, auth, onBack, t, showToast, tab, setTab }) => {
+const ZoneDetail = ({ zone, zones, onSwitchZone, onRefreshZones, zonesLoading, auth, onBack, t, showToast, tab, setTab, onAuthExpired }) => {
     const [records, setRecords] = useState([]);
     const [hostnames, setHostnames] = useState([]);
     const [loading, setLoading] = useState(false);
@@ -858,14 +916,31 @@ const ZoneDetail = ({ zone, zones, onSwitchZone, onRefreshZones, zonesLoading, a
     };
 
     const getHeaders = (withType = false) => getAuthHeaders(auth, withType);
+    const handleAuthResponse = (res) => {
+        if (res.status === 401) {
+            onAuthExpired?.();
+            return true;
+        }
+        return false;
+    };
 
     const fetchDNS = async () => {
         setLoading(true);
         try {
             const res = await fetch(`/api/zones/${zone.id}/dns_records`, { headers: getHeaders() });
+            if (handleAuthResponse(res)) {
+                setLoading(false);
+                return;
+            }
             const data = await res.json();
-            setRecords((data.result || []).sort((a, b) => new Date(b.modified_on) - new Date(a.modified_on)));
-        } catch (e) { }
+            if (res.ok) {
+                setRecords((data.result || []).sort((a, b) => new Date(b.modified_on) - new Date(a.modified_on)));
+            } else {
+                showToast(data.errors?.[0]?.message || data.message || t('errorOccurred'), 'error');
+            }
+        } catch (e) {
+            showToast(t('errorOccurred'), 'error');
+        }
         setLoading(false);
     };
 
@@ -875,7 +950,11 @@ const ZoneDetail = ({ zone, zones, onSwitchZone, onRefreshZones, zonesLoading, a
         try {
             const res = await fetch(`/api/zones/${zone.id}/custom_hostnames`, { headers: getHeaders() });
             if (!res.ok) {
-                const errorData = await res.json();
+                if (handleAuthResponse(res)) {
+                    setLoading(false);
+                    return;
+                }
+                const errorData = await res.json().catch(() => ({}));
                 throw new Error(errorData.message || 'Failed to fetch custom hostnames');
             }
             const data = await res.json();
@@ -921,6 +1000,7 @@ const ZoneDetail = ({ zone, zones, onSwitchZone, onRefreshZones, zonesLoading, a
         setError(null);
         try {
             const res = await fetch(`/api/zones/${zone.id}/fallback_origin`, { headers: getHeaders() });
+            if (handleAuthResponse(res)) return;
             const data = await res.json();
             if (data.result) {
                 setFallback({
@@ -948,6 +1028,10 @@ const ZoneDetail = ({ zone, zones, onSwitchZone, onRefreshZones, zonesLoading, a
                 fetchFallback();
                 showToast(t('updateSuccess'));
             } else {
+                if (handleAuthResponse(res)) {
+                    setFallbackLoading(false);
+                    return;
+                }
                 const data = await res.json().catch(() => ({}));
                 showToast(data.message || t('errorOccurred'), 'error');
             }
@@ -973,15 +1057,43 @@ const ZoneDetail = ({ zone, zones, onSwitchZone, onRefreshZones, zonesLoading, a
         const method = editingRecord ? 'PATCH' : 'POST';
         const url = `/api/zones/${zone.id}/dns_records${editingRecord ? `?id=${editingRecord.id}` : ''}`;
 
+        const normalizedName = normalizeDnsRecordName(newRecord.name, zone.name);
+        const sameNameRecords = records.filter(record =>
+            record.id !== editingRecord?.id && normalizeDnsRecordName(record.name, zone.name) === normalizedName
+        );
+
+        if ((newRecord.type === 'CNAME' && sameNameRecords.length > 0) || (newRecord.type !== 'CNAME' && sameNameRecords.some(record => record.type === 'CNAME'))) {
+            showToast(t('dnsConflictCname'), 'error');
+            return;
+        }
+        if (newRecord.type === 'CNAME') {
+            if (normalizeDnsRecordName(newRecord.content, zone.name) === normalizedName) {
+                showToast(t('cnameTargetSameName'), 'error');
+                return;
+            }
+        }
+        if ((newRecord.type === 'NS' && sameNameRecords.some(record => record.type !== 'NS')) || (newRecord.type !== 'NS' && sameNameRecords.some(record => record.type === 'NS'))) {
+            showToast(t('dnsConflictNs'), 'error');
+            return;
+        }
+
         // Clean up data for types that don't need it
         const payload = { ...newRecord };
-        const structuredTypes = ['SRV', 'CAA', 'URI', 'DS', 'TLSA', 'NAPTR', 'SSHFP', 'HTTPS', 'SVCB'];
-        if (!structuredTypes.includes(payload.type)) {
+        if (!PROXYABLE_DNS_TYPES.includes(payload.type)) {
+            delete payload.proxied;
+        }
+        if (payload.type === 'URI') {
+            payload.priority = parseInt(payload.data?.priority ?? payload.priority) || 10;
+            payload.data = { ...payload.data };
+            delete payload.data.priority;
+        } else if (payload.type !== 'MX') {
+            delete payload.priority;
+        }
+        if (!STRUCTURED_DNS_TYPES.includes(payload.type)) {
             delete payload.data;
         } else {
             delete payload.content;
             if (payload.type === 'SRV' || payload.type === 'URI') {
-                delete payload.priority; // Priority is inside data for SRV/URI
                 // Ensure data.name is sync with record name for SRV
                 if (payload.type === 'SRV' && payload.name) {
                     payload.data = { ...payload.data, name: payload.name };
@@ -989,21 +1101,26 @@ const ZoneDetail = ({ zone, zones, onSwitchZone, onRefreshZones, zonesLoading, a
             }
         }
 
-        const res = await fetch(url, {
-            method,
-            headers: getHeaders(true),
-            body: JSON.stringify(payload)
-        });
+        try {
+            const res = await fetch(url, {
+                method,
+                headers: getHeaders(true),
+                body: JSON.stringify(payload)
+            });
 
-        if (res.ok) {
-            setShowDNSModal(false);
-            setEditingRecord(null);
-            fetchDNS();
-            showToast(editingRecord ? t('updateSuccess') : t('addSuccess'));
-        } else {
-            const data = await res.json().catch(() => ({}));
-            const isFallbackError = data.errors?.some(e => e.code === 1040);
-            showToast(isFallbackError ? t('fallbackError') : (data.errors?.[0]?.message || data.message || t('errorOccurred')), 'error');
+            if (res.ok) {
+                setShowDNSModal(false);
+                setEditingRecord(null);
+                fetchDNS();
+                showToast(editingRecord ? t('updateSuccess') : t('addSuccess'));
+            } else {
+                if (handleAuthResponse(res)) return;
+                const data = await res.json().catch(() => ({}));
+                const isFallbackError = data.errors?.some(e => e.code === 1040);
+                showToast(isFallbackError ? t('fallbackError') : (data.errors?.[0]?.message || data.message || t('errorOccurred')), 'error');
+            }
+        } catch (err) {
+            showToast(t('errorOccurred'), 'error');
         }
     };
 
@@ -1034,72 +1151,77 @@ const ZoneDetail = ({ zone, zones, onSwitchZone, onRefreshZones, zonesLoading, a
             payload.custom_origin_snihost = null;
         }
 
-        const res = await fetch(url, {
-            method,
-            headers: getHeaders(true),
-            body: JSON.stringify(payload)
-        });
+        try {
+            const res = await fetch(url, {
+                method,
+                headers: getHeaders(true),
+                body: JSON.stringify(payload)
+            });
 
-        if (res.ok) {
-            const data = await res.json();
-            setShowSaaSModal(false);
-            setEditingSaaS(null);
-            fetchHostnames();
-            showToast(editingSaaS ? t('updateSuccess') : t('addSuccess'));
+            if (res.ok) {
+                const data = await res.json();
+                setShowSaaSModal(false);
+                setEditingSaaS(null);
+                fetchHostnames();
+                showToast(editingSaaS ? t('updateSuccess') : t('addSuccess'));
 
-            // Auto configure DNSPod verification for new hostnames (server mode only)
-            if (isCreating && auth?.mode === 'server' && data.result) {
-                const hostname = data.result;
+                // Auto configure DNSPod verification for new hostnames (server mode only)
+                if (isCreating && auth?.mode === 'server' && data.result) {
+                    const hostname = data.result;
 
-                // Process ownership verification (TXT record)
-                const ownershipVerify = hostname.ownership_verification;
-                if (ownershipVerify?.type === 'txt' && ownershipVerify.name && ownershipVerify.value) {
-                    try {
-                        const verifyRes = await fetch(`/api/zones/${zone.id}/auto_verify`, {
-                            method: 'POST',
-                            headers: getHeaders(true),
-                            body: JSON.stringify({
-                                hostname: hostname.hostname,
-                                txt_name: ownershipVerify.name,
-                                txt_value: ownershipVerify.value,
-                                record_type: 'TXT'
-                            })
-                        });
-                        const verifyData = await verifyRes.json();
-                        if (verifyData.success) {
-                            showToast(t('autoVerifySuccess'));
-                        } else {
-                            console.log('Auto verify result:', verifyData);
-                        }
-                    } catch (e) {
-                        console.error('Auto verify error:', e);
-                    }
-                }
-
-                // Also process SSL validation records if available
-                const validationRecords = hostname.ssl?.validation_records || [];
-                for (const rec of validationRecords) {
-                    if (rec.txt_name && rec.txt_value) {
+                    // Process ownership verification (TXT record)
+                    const ownershipVerify = hostname.ownership_verification;
+                    if (ownershipVerify?.type === 'txt' && ownershipVerify.name && ownershipVerify.value) {
                         try {
-                            await fetch(`/api/zones/${zone.id}/auto_verify`, {
+                            const verifyRes = await fetch(`/api/zones/${zone.id}/auto_verify`, {
                                 method: 'POST',
                                 headers: getHeaders(true),
                                 body: JSON.stringify({
                                     hostname: hostname.hostname,
-                                    txt_name: rec.txt_name,
-                                    txt_value: rec.txt_value,
+                                    txt_name: ownershipVerify.name,
+                                    txt_value: ownershipVerify.value,
                                     record_type: 'TXT'
                                 })
                             });
-                        } catch {
-                            // Silently ignore
+                            const verifyData = await verifyRes.json();
+                            if (verifyData.success) {
+                                showToast(t('autoVerifySuccess'));
+                            } else {
+                                console.log('Auto verify result:', verifyData);
+                            }
+                        } catch (e) {
+                            console.error('Auto verify error:', e);
+                        }
+                    }
+
+                    // Also process SSL validation records if available
+                    const validationRecords = hostname.ssl?.validation_records || [];
+                    for (const rec of validationRecords) {
+                        if (rec.txt_name && rec.txt_value) {
+                            try {
+                                await fetch(`/api/zones/${zone.id}/auto_verify`, {
+                                    method: 'POST',
+                                    headers: getHeaders(true),
+                                    body: JSON.stringify({
+                                        hostname: hostname.hostname,
+                                        txt_name: rec.txt_name,
+                                        txt_value: rec.txt_value,
+                                        record_type: 'TXT'
+                                    })
+                                });
+                            } catch {
+                                // Silently ignore
+                            }
                         }
                     }
                 }
+            } else {
+                if (handleAuthResponse(res)) return;
+                const data = await res.json().catch(() => ({}));
+                showToast(data.message || t('errorOccurred'), 'error');
             }
-        } else {
-            const data = await res.json().catch(() => ({}));
-            showToast(data.message || t('errorOccurred'), 'error');
+        } catch (e) {
+            showToast(t('errorOccurred'), 'error');
         }
     };
 
@@ -1113,6 +1235,7 @@ const ZoneDetail = ({ zone, zones, onSwitchZone, onRefreshZones, zonesLoading, a
                 fetchDNS();
                 showToast(t('deleteSuccess'));
             } else {
+                if (handleAuthResponse(res)) return;
                 const data = await res.json().catch(() => ({}));
                 showToast(data.message || t('errorOccurred'), 'error');
             }
@@ -1129,6 +1252,7 @@ const ZoneDetail = ({ zone, zones, onSwitchZone, onRefreshZones, zonesLoading, a
                 fetchHostnames();
                 showToast(t('deleteSuccess'));
             } else {
+                if (handleAuthResponse(res)) return;
                 const data = await res.json().catch(() => ({}));
                 showToast(data.message || t('errorOccurred'), 'error');
             }
@@ -1136,7 +1260,7 @@ const ZoneDetail = ({ zone, zones, onSwitchZone, onRefreshZones, zonesLoading, a
     };
 
     const toggleProxied = async (record) => {
-        if (!['A', 'AAAA', 'CNAME'].includes(record.type)) return;
+        if (!PROXYABLE_DNS_TYPES.includes(record.type)) return;
 
         // Optimistic update
         const originalStatus = record.proxied;
@@ -1151,6 +1275,13 @@ const ZoneDetail = ({ zone, zones, onSwitchZone, onRefreshZones, zonesLoading, a
                 body: JSON.stringify({ proxied: !originalStatus })
             });
             if (!res.ok) {
+                if (handleAuthResponse(res)) {
+                    setRecords(prev => prev.map(r =>
+                        r.id === record.id ? { ...r, proxied: originalStatus } : r
+                    ));
+                    return;
+                }
+                const data = await res.json().catch(() => ({}));
                 // Revert on failure
                 setRecords(prev => prev.map(r =>
                     r.id === record.id ? { ...r, proxied: originalStatus } : r
@@ -1178,7 +1309,7 @@ const ZoneDetail = ({ zone, zones, onSwitchZone, onRefreshZones, zonesLoading, a
         setNewRecord({
             type: record.type,
             name: record.name,
-            content: record.content,
+            content: record.content || '',
             ttl: record.ttl,
             proxied: record.proxied,
             comment: record.comment || '',
@@ -1192,6 +1323,7 @@ const ZoneDetail = ({ zone, zones, onSwitchZone, onRefreshZones, zonesLoading, a
         try {
             const headers = getHeaders();
             const res = await fetch(`/api/zones/${zone.id}/dns_export`, { headers });
+            if (handleAuthResponse(res)) return;
             if (!res.ok) throw new Error('Export failed');
 
             const blob = await res.blob();
@@ -1223,6 +1355,11 @@ const ZoneDetail = ({ zone, zones, onSwitchZone, onRefreshZones, zonesLoading, a
                 headers: getHeaders(), // Don't set Content-Type
                 body: formData
             });
+            if (handleAuthResponse(res)) {
+                setImportLoading(false);
+                e.target.value = '';
+                return;
+            }
             const data = await res.json();
             if (res.ok) {
                 showToast(t('importSuccess'));
@@ -1250,6 +1387,10 @@ const ZoneDetail = ({ zone, zones, onSwitchZone, onRefreshZones, zonesLoading, a
                         deletes: Array.from(selectedRecords).map(id => ({ id }))
                     })
                 });
+                if (handleAuthResponse(res)) {
+                    setLoading(false);
+                    return;
+                }
                 const data = await res.json();
                 if (res.ok) {
                     showToast(t('deleteSuccess'));
@@ -1282,11 +1423,20 @@ const ZoneDetail = ({ zone, zones, onSwitchZone, onRefreshZones, zonesLoading, a
         });
     };
 
-    const filteredRecords = records.filter(r =>
-        r.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        r.content.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        r.type.toLowerCase().includes(searchTerm.toLowerCase())
-    );
+    const normalizedSearchTerm = searchTerm.toLowerCase();
+    const filteredRecords = records.filter(r => {
+        const komariNames = komariEnabled
+            ? (ipToNameMap.get(r.content) || []).join(' ').toLowerCase()
+            : '';
+
+        return (
+            r.name.toLowerCase().includes(normalizedSearchTerm) ||
+            String(r.content || '').toLowerCase().includes(normalizedSearchTerm) ||
+            String(r.comment || '').toLowerCase().includes(normalizedSearchTerm) ||
+            r.type.toLowerCase().includes(normalizedSearchTerm) ||
+            komariNames.includes(normalizedSearchTerm)
+        );
+    });
 
     const filteredSaaS = hostnames.filter(h =>
         h.hostname.toLowerCase().includes(searchTerm.toLowerCase())
@@ -1754,8 +1904,15 @@ const ZoneDetail = ({ zone, zones, onSwitchZone, onRefreshZones, zonesLoading, a
                                 <div style={{ flex: 1 }}>
                                     <CustomSelect
                                         value={newRecord.type}
-                                        onChange={(e) => setNewRecord({ ...newRecord, type: e.target.value })}
-                                        options={['A', 'AAAA', 'CNAME', 'TXT', 'MX', 'NS', 'SRV', 'URI', 'CAA', 'DS', 'TLSA', 'CERT', 'DNSKEY', 'HTTPS', 'LOC', 'NAPTR', 'PTR', 'SMIMEA', 'SSHFP', 'SVCB'].map(t => ({ value: t, label: t }))}
+                                        onChange={(e) => {
+                                            const newType = e.target.value;
+                                            setNewRecord({
+                                                ...newRecord,
+                                                type: newType,
+                                                proxied: PROXYABLE_DNS_TYPES.includes(newType) ? newRecord.proxied : false
+                                            });
+                                        }}
+                                        options={DNS_RECORD_TYPES.map(t => ({ value: t, label: t }))}
                                     />
                                 </div>
                             </div>
@@ -1764,7 +1921,7 @@ const ZoneDetail = ({ zone, zones, onSwitchZone, onRefreshZones, zonesLoading, a
                                 <input type="text" value={newRecord.name} onChange={e => setNewRecord({ ...newRecord, name: e.target.value })} placeholder={newRecord.type === 'SRV' ? '_sip._tcp' : '@'} required />
                             </div>
 
-                            {!['SRV', 'CAA', 'URI', 'DS', 'TLSA', 'NAPTR', 'SSHFP', 'HTTPS', 'SVCB'].includes(newRecord.type) && (
+                            {!STRUCTURED_DNS_TYPES.includes(newRecord.type) && (
                                 <div className="input-row">
                                     <label>{t('content')}</label>
                                     <input type="text" value={newRecord.content} onChange={e => setNewRecord({ ...newRecord, content: e.target.value })} placeholder={newRecord.type === 'LOC' ? '33 40 31 N 106 28 29 W 10m' : 'Value'} required />
@@ -1782,6 +1939,7 @@ const ZoneDetail = ({ zone, zones, onSwitchZone, onRefreshZones, zonesLoading, a
                                                 onChange={(e) => setNewRecord({ ...newRecord, content: e.target.value })}
                                                 options={[{ value: '', label: t('komariSelectPlaceholder') }, ...opts]}
                                                 placeholder={t('komariSelectPlaceholder')}
+                                                searchable
                                             />
                                         </div>
                                     </div>
@@ -2276,7 +2434,7 @@ const ZoneDetail = ({ zone, zones, onSwitchZone, onRefreshZones, zonesLoading, a
 };
 
 // DNSPod Manager Component
-const DnspodManager = ({ auth, onBack, t, showToast }) => {
+const DnspodManager = ({ auth, onBack, t, showToast, onAuthExpired }) => {
     const [domains, setDomains] = useState([]);
     const [selectedDomain, setSelectedDomain] = useState(null);
     const [records, setRecords] = useState([]);
@@ -2299,6 +2457,13 @@ const DnspodManager = ({ auth, onBack, t, showToast }) => {
     };
 
     const getHeaders = (withType = false) => getAuthHeaders(auth, withType);
+    const handleAuthResponse = (res) => {
+        if (res.status === 401) {
+            onAuthExpired?.();
+            return true;
+        }
+        return false;
+    };
 
     // Fetch DNSPod domains
     const fetchDomains = async () => {
@@ -2309,6 +2474,10 @@ const DnspodManager = ({ auth, onBack, t, showToast }) => {
                 headers: getHeaders(true),
                 body: JSON.stringify({ action: 'DescribeDomainList' })
             });
+            if (handleAuthResponse(res)) {
+                setLoading(false);
+                return;
+            }
             const data = await res.json();
             if (data.Response?.DomainList) {
                 setDomains(data.Response.DomainList);
@@ -2335,6 +2504,10 @@ const DnspodManager = ({ auth, onBack, t, showToast }) => {
                     Domain: selectedDomain.Name
                 })
             });
+            if (handleAuthResponse(res)) {
+                setLoading(false);
+                return;
+            }
             const data = await res.json();
             setRecords(data.Response?.RecordList || []);
         } catch (e) {
@@ -2378,6 +2551,10 @@ const DnspodManager = ({ auth, onBack, t, showToast }) => {
                 headers: getHeaders(true),
                 body: JSON.stringify(payload)
             });
+            if (handleAuthResponse(res)) {
+                setLoading(false);
+                return;
+            }
             const data = await res.json();
             if (data.success) {
                 showToast(editingRecord ? t('updateSuccess') : t('addSuccess'));
@@ -2406,6 +2583,7 @@ const DnspodManager = ({ auth, onBack, t, showToast }) => {
                         RecordId: recordId
                     })
                 });
+                if (handleAuthResponse(res)) return;
                 const data = await res.json();
                 if (data.success) {
                     showToast(t('deleteSuccess'));
@@ -2645,8 +2823,8 @@ const DnspodManager = ({ auth, onBack, t, showToast }) => {
                                             onChange={(e) => setNewRecord({ ...newRecord, TTL: parseInt(e.target.value) })}
                                             options={[
                                                 { value: '1', label: t('ttlAuto') },
-                                                { value: '60', label: '1 ' + t('ttl1m').split(' ')[1] },
-                                                { value: '300', label: '5 ' + t('ttl5m').split(' ')[1] },
+                                                { value: '60', label: t('ttl1min') },
+                                                { value: '300', label: t('ttl5min') },
                                                 { value: '600', label: '10 min' },
                                                 { value: '3600', label: '1 ' + t('ttl1h').split(' ')[1] }
                                             ]}
@@ -2685,7 +2863,27 @@ const DnspodManager = ({ auth, onBack, t, showToast }) => {
 
 const App = () => {
     const { t, lang, changeLang, toggleLang } = useTranslate();
-    const [auth, setAuth] = useState(null);
+    const [auth, setAuth] = useState(() => {
+        const saved = localStorage.getItem('auth_session') || sessionStorage.getItem('auth_session');
+        if (!saved) return null;
+
+        try {
+            const credentials = JSON.parse(saved);
+            if (credentials.mode === 'server' && credentials.token && isTokenExpired(credentials.token)) {
+                localStorage.removeItem('auth_session');
+                sessionStorage.removeItem('auth_session');
+                return null;
+            }
+            if (credentials.mode === 'server' && credentials.accounts?.length && credentials.currentAccountIndex === undefined) {
+                credentials.currentAccountIndex = credentials.accounts[0].id;
+            }
+            return credentials;
+        } catch {
+            localStorage.removeItem('auth_session');
+            sessionStorage.removeItem('auth_session');
+            return null;
+        }
+    });
     const [showAccountSelector, setShowAccountSelector] = useState(false);
     const accountSelectorRef = useRef(null);
     const [zones, setZones] = useState([]);
@@ -2753,36 +2951,74 @@ const App = () => {
                 } else {
                     setSelectedZone(null);
                 }
+            } else if (res.status === 401) {
+                handleLogout();
+            } else {
+                const errorMsg = data.errors?.[0]?.message || data.message || data.error || t('errorOccurred');
+                showToast(errorMsg, 'error');
             }
-        } catch (err) { }
+        } catch (err) {
+            showToast(t('errorOccurred'), 'error');
+        }
         setLoading(false);
     };
 
 
 
     useEffect(() => {
-        const saved = localStorage.getItem('auth_session') || sessionStorage.getItem('auth_session');
-        if (saved) {
-            try {
-                const credentials = JSON.parse(saved);
-                setAuth(credentials);
-                fetchZones(credentials);
-            } catch (e) {
-                localStorage.removeItem('auth_session');
-                sessionStorage.removeItem('auth_session');
-            }
+        if (!auth) return;
+
+        if (auth.mode === 'server' && auth.token) {
+            fetch('/api/refresh', {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${auth.token}` }
+            }).then(async res => {
+                if (res.ok) {
+                    const data = await res.json();
+                    const newAuth = { ...auth, token: data.token };
+                    setAuth(newAuth);
+                    if (newAuth.remember) {
+                        localStorage.setItem('auth_session', JSON.stringify(newAuth));
+                    } else {
+                        sessionStorage.setItem('auth_session', JSON.stringify(newAuth));
+                    }
+                } else if (res.status === 401) {
+                    handleLogout();
+                }
+            }).catch(() => {});
         }
+
+        fetchZones(auth);
     }, []);
 
-    const handleLogin = (credentials) => {
-        setAuth(credentials);
-        if (credentials.remember) {
-            localStorage.setItem('auth_session', JSON.stringify(credentials));
+    const handleLogin = async (credentials) => {
+        let finalCredentials = { ...credentials };
+
+        if (finalCredentials.mode === 'server' && (!finalCredentials.accounts || finalCredentials.accounts.length === 0)) {
+            try {
+                const res = await fetch('/api/accounts', {
+                    headers: getAuthHeaders(finalCredentials)
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    finalCredentials.accounts = data.accounts || [];
+                }
+            } catch {
+                // Account discovery is optional; login can continue without it.
+            }
+        }
+        if (finalCredentials.mode === 'server' && finalCredentials.accounts?.length && finalCredentials.currentAccountIndex === undefined) {
+            finalCredentials.currentAccountIndex = finalCredentials.accounts[0].id;
+        }
+
+        setAuth(finalCredentials);
+        if (finalCredentials.remember) {
+            localStorage.setItem('auth_session', JSON.stringify(finalCredentials));
         } else {
             // Always use sessionStorage to at least survive refresh within the session
-            sessionStorage.setItem('auth_session', JSON.stringify(credentials));
+            sessionStorage.setItem('auth_session', JSON.stringify(finalCredentials));
         }
-        fetchZones(credentials);
+        fetchZones(finalCredentials);
     };
 
     const handleLogout = () => {
@@ -2971,6 +3207,7 @@ const App = () => {
                         onBack={() => setCurrentPage('cloudflare')}
                         t={t}
                         showToast={showToast}
+                        onAuthExpired={handleLogout}
                     />
                 ) : selectedZone ? (
                     <ZoneDetail
@@ -2985,6 +3222,7 @@ const App = () => {
                         showToast={showToast}
                         tab={zoneTab}
                         setTab={setZoneTab}
+                        onAuthExpired={handleLogout}
                     />
                 ) : (
                     <div className="container" style={{ textAlign: 'center', marginTop: '4rem', color: 'var(--text-muted)' }}>
